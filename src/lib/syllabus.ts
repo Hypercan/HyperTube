@@ -47,5 +47,16 @@ export function normalizeSyllabus(raw: Syllabus, durationSeconds: number): Sylla
   return { ...raw, chapters };
 }
 
-/** Videos longer than this don't fit Gemini's context at low media resolution. */
-export const MAX_ANALYZABLE_SECONDS = 3 * 60 * 60;
+const TOKENS_PER_FRAME = 70;
+const AUDIO_TOKENS_PER_SECOND = 25;
+/** The free tier allows 250K tokens per minute, and one video is sent in a single request. */
+const REQUEST_TOKEN_BUDGET = 200_000;
+
+/** Past this, even the audio plus a frame every ~25 s no longer fits the request budget. */
+export const MAX_ANALYZABLE_SECONDS = 2 * 60 * 60;
+
+/** Samples fewer frames from longer videos so every request stays inside the token budget. */
+export function framesPerSecondFor(durationSeconds: number): number {
+  const fps = (REQUEST_TOKEN_BUDGET / Math.max(durationSeconds, 1) - AUDIO_TOKENS_PER_SECOND) / TOKENS_PER_FRAME;
+  return Math.min(1, Math.floor(fps * 1000) / 1000);
+}

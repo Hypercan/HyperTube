@@ -20,10 +20,10 @@ export const env = {
     return required("GEMINI_API_KEY");
   },
   get screeningModel() {
-    return process.env.GEMINI_SCREENING_MODEL || "gemini-flash-lite-latest";
+    return process.env.GEMINI_SCREENING_MODEL || "gemini-3.5-flash-lite";
   },
   get syllabusModel() {
-    return process.env.GEMINI_SYLLABUS_MODEL || "gemini-flash-latest";
+    return process.env.GEMINI_SYLLABUS_MODEL || "gemini-4-hydrogen";
   },
   get appPassword() {
     return required("APP_PASSWORD");

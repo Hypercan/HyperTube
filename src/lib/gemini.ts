@@ -1,13 +1,23 @@
 import "server-only";
-import { GoogleGenAI, MediaResolution } from "@google/genai";
+import { ApiError, GoogleGenAI, type GenerateContentParameters, type GenerateContentResponse } from "@google/genai";
 import type { Goal } from "./db";
 import { env } from "./env";
-import { normalizeSyllabus, SYLLABUS_SCHEMA, type Syllabus } from "./syllabus";
+import { framesPerSecondFor, normalizeSyllabus, SYLLABUS_SCHEMA, type Syllabus } from "./syllabus";
 
 let client: GoogleGenAI | undefined;
-function ai(): GoogleGenAI {
+
+/** The free tier allows only a handful of requests per minute, so 429s are waited out. */
+async function generate(params: GenerateContentParameters): Promise<GenerateContentResponse> {
   client ??= new GoogleGenAI({ apiKey: env.geminiApiKey });
-  return client;
+  for (const delayMs of [15_000, 30_000, 0]) {
+    try {
+      return await client.models.generateContent(params);
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 429) || delayMs === 0) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error("unreachable");
 }
 
 export type ScreeningInput = { id: string; title: string; channelTitle: string; description: string };
@@ -47,7 +57,7 @@ Video hangi dilde olursa olsun değerlendir; gerekçeyi Türkçe yaz.
 Videolar:
 ${videoList}`;
 
-  const response = await ai().models.generateContent({
+  const response = await generate({
     model: env.screeningModel,
     contents: prompt,
     config: { responseMimeType: "application/json", responseJsonSchema: SCREENING_SCHEMA, temperature: 0.2 },
@@ -71,14 +81,16 @@ Konuşmayı ve ekranda gösterilen slayt, kod, diyagram gibi görselleri birlikt
 Bölümler videonun gerçek akışını yansıtsın; zaman damgaları videodaki gerçek başlangıç anları olsun.
 Video hangi dilde olursa olsun her şeyi Türkçe yaz.`;
 
-  const response = await ai().models.generateContent({
+  const response = await generate({
     model: env.syllabusModel,
-    contents: [{ fileData: { fileUri: `https://www.youtube.com/watch?v=${video.id}` } }, { text: prompt }],
-    config: {
-      responseMimeType: "application/json",
-      responseJsonSchema: SYLLABUS_SCHEMA,
-      mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
-    },
+    contents: [
+      {
+        fileData: { fileUri: `https://www.youtube.com/watch?v=${video.id}` },
+        videoMetadata: { fps: framesPerSecondFor(video.durationSeconds) },
+      },
+      { text: prompt },
+    ],
+    config: { responseMimeType: "application/json", responseJsonSchema: SYLLABUS_SCHEMA },
   });
 
   return normalizeSyllabus(JSON.parse(response.text ?? "{}") as Syllabus, video.durationSeconds);

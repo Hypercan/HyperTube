@@ -16,7 +16,7 @@ export async function POST(_request: Request, ctx: RouteContext<"/api/syllabus/[
   const video = unwrap(await db().from("videos").select("*").eq("id", id).maybeSingle()) as Video | null;
   if (!video) return Response.json({ error: "Video bulunamadı." }, { status: 404 });
   if (video.duration_seconds > MAX_ANALYZABLE_SECONDS) {
-    return Response.json({ error: "Video 3 saatten uzun; şimdilik analiz edilemiyor." }, { status: 422 });
+    return Response.json({ error: "Video 2 saatten uzun; ücretsiz katmanda tek seferde analiz edilemiyor." }, { status: 422 });
   }
 
   const usedToday = unwrap(
