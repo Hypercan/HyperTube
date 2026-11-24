@@ -1,7 +1,7 @@
 import { hasSession } from "@/lib/auth";
 import { db, today, unwrap, type Video } from "@/lib/db";
 import { env } from "@/lib/env";
-import { generateSyllabus } from "@/lib/gemini";
+import { friendlyGeminiError, generateSyllabus, isGeminiTransient } from "@/lib/gemini";
 import { MAX_ANALYZABLE_SECONDS, type Syllabus } from "@/lib/syllabus";
 
 export const maxDuration = 300;
@@ -32,7 +32,7 @@ export async function POST(_request: Request, ctx: RouteContext<"/api/syllabus/[
     unwrap(await db().from("syllabi").upsert({ video_id: video.id, content: syllabus, model: env.syllabusModel }));
     return Response.json(syllabus);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ error: `Syllabus üretilemedi: ${message.slice(0, 300)}` }, { status: 502 });
+    const status = isGeminiTransient(error) ? 503 : 502;
+    return Response.json({ error: `Syllabus üretilemedi: ${friendlyGeminiError(error)}` }, { status });
   }
 }

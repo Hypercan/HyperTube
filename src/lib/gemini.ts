@@ -6,18 +6,72 @@ import { framesPerSecondFor, normalizeSyllabus, SYLLABUS_SCHEMA, type Syllabus }
 
 let client: GoogleGenAI | undefined;
 
-/** The free tier allows only a handful of requests per minute, so 429s are waited out. */
-async function generate(params: GenerateContentParameters): Promise<GenerateContentResponse> {
+const RETRY_DELAYS_MS = [12_000, 25_000, 45_000, 90_000, 0];
+
+const SCREENING_FALLBACKS = ["gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
+const SYLLABUS_FALLBACKS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash"];
+
+function client_(): GoogleGenAI {
   client ??= new GoogleGenAI({ apiKey: env.geminiApiKey });
-  for (const delayMs of [15_000, 30_000, 0]) {
+  return client;
+}
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/** Google's 503 / UNAVAILABLE / high-demand responses should be retried or switched to another model. */
+export function isGeminiTransient(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return [408, 429, 500, 502, 503, 504].includes(error.status);
+  }
+  return /503|429|UNAVAILABLE|high demand|RESOURCE_EXHAUSTED|overloaded|try again later/i.test(errorText(error));
+}
+
+/** User-facing Turkish copy for settings / API responses. */
+export function friendlyGeminiError(error: unknown): string {
+  if (isGeminiTransient(error)) {
+    return "Gemini şu an yoğun (geçici). Birkaç dakika sonra Yenile’yi tekrar dene; sorun sürerse Vercel’de GEMINI_SCREENING_MODEL=gemini-2.5-flash-lite yapıp Redeploy et.";
+  }
+  const raw = errorText(error);
+  try {
+    const json = JSON.parse(raw) as { error?: { message?: string } };
+    if (json.error?.message) return `Gemini: ${json.error.message}`;
+  } catch {
+    /* not JSON */
+  }
+  return raw.length > 280 ? `${raw.slice(0, 280)}…` : raw;
+}
+
+function modelChain(primary: string, envList: string | undefined, defaults: string[]): string[] {
+  const extra = envList?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+  return [...new Set([primary, ...extra, ...defaults])];
+}
+
+async function generate(params: GenerateContentParameters): Promise<GenerateContentResponse> {
+  for (const delayMs of RETRY_DELAYS_MS) {
     try {
-      return await client.models.generateContent(params);
+      return await client_().models.generateContent(params);
     } catch (error) {
-      if (!(error instanceof ApiError && error.status === 429) || delayMs === 0) throw error;
+      if (!isGeminiTransient(error) || delayMs === 0) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
   throw new Error("unreachable");
+}
+
+async function generateFirstAvailable(build: (model: string) => GenerateContentParameters, models: string[]): Promise<GenerateContentResponse> {
+  let last: unknown;
+  for (const model of models) {
+    try {
+      return await generate(build(model));
+    } catch (error) {
+      last = error;
+      if (!isGeminiTransient(error)) throw error;
+    }
+  }
+  throw last ?? new Error("Gemini yanıt vermedi");
 }
 
 export type ScreeningInput = { id: string; title: string; channelTitle: string; description: string };
@@ -57,11 +111,15 @@ Video hangi dilde olursa olsun değerlendir; gerekçeyi Türkçe yaz.
 Videolar:
 ${videoList}`;
 
-  const response = await generate({
-    model: env.screeningModel,
-    contents: prompt,
-    config: { responseMimeType: "application/json", responseJsonSchema: SCREENING_SCHEMA, temperature: 0.2 },
-  });
+  const models = modelChain(env.screeningModel, process.env.GEMINI_SCREENING_MODEL_FALLBACKS, SCREENING_FALLBACKS);
+  const response = await generateFirstAvailable(
+    (model) => ({
+      model,
+      contents: prompt,
+      config: { responseMimeType: "application/json", responseJsonSchema: SCREENING_SCHEMA, temperature: 0.2 },
+    }),
+    models,
+  );
 
   const parsed = JSON.parse(response.text ?? "[]") as { video: number; goal: number; score: number; reason: string }[];
   return parsed
@@ -81,17 +139,21 @@ Konuşmayı ve ekranda gösterilen slayt, kod, diyagram gibi görselleri birlikt
 Bölümler videonun gerçek akışını yansıtsın; zaman damgaları videodaki gerçek başlangıç anları olsun.
 Video hangi dilde olursa olsun her şeyi Türkçe yaz.`;
 
-  const response = await generate({
-    model: env.syllabusModel,
-    contents: [
-      {
-        fileData: { fileUri: `https://www.youtube.com/watch?v=${video.id}` },
-        videoMetadata: { fps: framesPerSecondFor(video.durationSeconds) },
-      },
-      { text: prompt },
-    ],
-    config: { responseMimeType: "application/json", responseJsonSchema: SYLLABUS_SCHEMA },
-  });
+  const models = modelChain(env.syllabusModel, process.env.GEMINI_SYLLABUS_MODEL_FALLBACKS, SYLLABUS_FALLBACKS);
+  const response = await generateFirstAvailable(
+    (model) => ({
+      model,
+      contents: [
+        {
+          fileData: { fileUri: `https://www.youtube.com/watch?v=${video.id}` },
+          videoMetadata: { fps: framesPerSecondFor(video.durationSeconds) },
+        },
+        { text: prompt },
+      ],
+      config: { responseMimeType: "application/json", responseJsonSchema: SYLLABUS_SCHEMA },
+    }),
+    models,
+  );
 
   return normalizeSyllabus(JSON.parse(response.text ?? "{}") as Syllabus, video.durationSeconds);
 }

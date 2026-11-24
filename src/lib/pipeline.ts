@@ -70,6 +70,7 @@ async function screenPending(): Promise<number> {
 
   let screened = 0;
   for (let i = 0; i < pending.length; i += SCREENING_BATCH) {
+    if (i > 0) await new Promise((resolve) => setTimeout(resolve, 4_000));
     const batch = pending.slice(i, i + SCREENING_BATCH);
     const results = await screenCandidates(
       goals,

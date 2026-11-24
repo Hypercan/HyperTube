@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { requireSession } from "@/lib/auth";
 import { parseChannelInput } from "@/lib/channel-input";
 import { db, unwrap } from "@/lib/db";
+import { friendlyGeminiError } from "@/lib/gemini";
 import { invalidateScreenings, runDailyPipeline } from "@/lib/pipeline";
 import { fetchChannel } from "@/lib/youtube";
 
@@ -73,7 +74,7 @@ export async function refreshFeed() {
   try {
     report = await runDailyPipeline();
   } catch (error) {
-    back(`Yenileme yarıda kaldı: ${error instanceof Error ? error.message : String(error)}`, "hata");
+    back(`Yenileme yarıda kaldı: ${friendlyGeminiError(error)}`, "hata");
   }
   revalidatePath("/", "layout");
   back(`Akış yenilendi: ${report.newVideos} yeni aday, ${report.screened} ön eleme, Akış'ta ${report.feedSize} video.`);
