@@ -165,6 +165,64 @@ ${videoList}`;
     }));
 }
 
+const DISCOVERY_SCHEMA = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      goal: { type: "integer", description: "Hedefin listedeki numarası." },
+      queries: { type: "array", items: { type: "string" } },
+    },
+    required: ["goal", "queries"],
+  },
+} as const;
+
+/** Keşif araması: YouTube search queries per Hedef, steered away from the ones used last time. */
+export async function generateDiscoveryQueries(
+  goals: (Goal & { discovery_queries: string[] })[],
+  perGoal: number,
+  options: CallOptions = {},
+): Promise<Map<string, string[]>> {
+  const goalList = goals
+    .map((g, i) => {
+      const previous = g.discovery_queries.length ? `\n   Son kullanılan sorgular (tekrarlama): ${g.discovery_queries.join(" | ")}` : "";
+      return `${i}. ${g.name}${g.description ? `: ${g.description}` : ""}${previous}`;
+    })
+    .join("\n");
+
+  const prompt = `Kendini geliştirmeye odaklı bir kullanıcı için YouTube'da derinlemesine, öğretici, uzun videolar bulacak arama sorguları yazıyorsun.
+
+Hedefler:
+${goalList}
+
+Her hedef için ${perGoal} farklı YouTube arama sorgusu yaz.
+- Sorgular hedefin farklı alt konularına ve seviyelerine yayılsın; ders, konferans konuşması, uzman röportajı, kapsamlı anlatım bulmaya yönelik olsun.
+- Clickbait, haber, drama, tepki videosu getirecek sorgulardan kaçın.
+- En az biri İngilizce olsun; diğerleri hedefin diline veya içeriğin en iyi bulunacağı dile göre seçilsin.
+- Kısa tut (2-6 kelime), YouTube araması gibi yaz.`;
+
+  const models = modelChain(env.screeningModel, process.env.GEMINI_SCREENING_MODEL_FALLBACKS, SCREENING_FALLBACKS);
+  const response = await generateFirstAvailable(
+    (model) => ({
+      model,
+      contents: prompt,
+      config: { responseMimeType: "application/json", responseJsonSchema: DISCOVERY_SCHEMA, temperature: 0.9 },
+    }),
+    models,
+    { timeoutMs: 45_000, ...options },
+  );
+
+  const parsed = JSON.parse(response.text ?? "[]") as { goal: number; queries: string[] }[];
+  const byGoal = new Map<string, string[]>();
+  for (const entry of parsed) {
+    const goal = goals[entry.goal];
+    if (!goal) continue;
+    const queries = entry.queries.map((q) => q.trim()).filter(Boolean).slice(0, perGoal);
+    if (queries.length) byGoal.set(goal.id, queries);
+  }
+  return byGoal;
+}
+
 /** Derin analiz: Gemini watches the public video itself instead of a transcript (ADR-0004). */
 export async function generateSyllabus(
   video: { id: string; title: string; durationSeconds: number },

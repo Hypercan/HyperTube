@@ -1,9 +1,10 @@
 import "server-only";
+import { addCandidates, screenAndSave, toVideoRow, type ScreeningCandidate } from "./candidates";
 import { db, today, unwrap, type Channel, type Goal } from "./db";
 import { MIN_VIDEO_SECONDS } from "./duration";
 import { buildFeed } from "./feed";
-import { friendlyGeminiError, screenCandidates } from "./gemini";
-import { fetchLatestUploadIds, fetchVideos, type YoutubeVideo } from "./youtube";
+import { friendlyGeminiError, generateDiscoveryQueries } from "./gemini";
+import { fetchLatestUploadIds, fetchVideos, searchVideoIds } from "./youtube";
 
 const SCREENING_BATCH = 25;
 const RECENTLY_SHOWN_DAYS = 7;
@@ -12,28 +13,47 @@ const MAX_SCREENED_PER_RUN = 250;
 /** Time kept back after Ön eleme so the Akış is always rebuilt before the serverless limit. */
 const FEED_RESERVE_MS = 25_000;
 
+/** Keşif araması costs one search.list call per query; the rest of the ~100/day is left for manual Arama. */
+const DISCOVERY_QUERIES_PER_GOAL = 3;
+const DISCOVERY_RESULTS_PER_QUERY = 15;
+const MAX_DISCOVERY_GOALS_PER_RUN = 8;
+const DISCOVER_EVERY_MS = 20 * 3600_000;
+
 export type PipelineReport = {
   newVideos: number;
+  discovered: number;
   screened: number;
   pending: number;
   feedSize: number;
   refreshed: number;
   deleted: number;
   screeningError: string | null;
+  discoveryError: string | null;
 };
 
 /**
- * The daily job: Kaynak kanallar → Adaylar → Ön eleme → Akış. Ön eleme stops when the
- * time budget runs out or Gemini is unavailable; whatever was screened still makes an Akış,
- * and the rest is picked up by the next run.
+ * The daily job: Kaynak kanallar + Keşif araması → Adaylar → Ön eleme → Akış. Ön eleme stops
+ * when the time budget runs out or Gemini is unavailable; whatever was screened still makes an
+ * Akış, and the rest is picked up by the next run.
  */
 export async function runDailyPipeline({ budgetMs }: { budgetMs: number }): Promise<PipelineReport> {
   const deadline = Date.now() + budgetMs;
   const { refreshed, deleted } = await enforceRetention();
   const newVideos = await ingestChannels();
+  const discovery = await discover(deadline - FEED_RESERVE_MS);
   const { screened, pending, error } = await screenPending(deadline - FEED_RESERVE_MS);
   const feedSize = await buildTodayFeed();
-  return { newVideos, screened, pending, feedSize, refreshed, deleted, screeningError: error };
+  return {
+    newVideos,
+    discovered: discovery.inserted,
+    screened,
+    pending,
+    feedSize,
+    refreshed,
+    deleted,
+    screeningError: error,
+    discoveryError: discovery.error,
+  };
 }
 
 async function ingestChannels(): Promise<number> {
@@ -42,32 +62,41 @@ async function ingestChannels(): Promise<number> {
   let inserted = 0;
 
   for (const channel of channels.filter((c) => !syncedRecently(c))) {
-    const ids = await fetchLatestUploadIds(channel.uploads_playlist_id);
-    const known = unwrap(await db().from("videos").select("id").in("id", ids)) as { id: string }[];
-    const knownIds = new Set(known.map((v) => v.id));
-    const fresh = await fetchVideos(ids.filter((id) => !knownIds.has(id)));
-    const rows = fresh.filter((v) => !v.isLive).map(toVideoRow);
-    if (rows.length) {
-      unwrap(await db().from("videos").upsert(rows));
-      inserted += rows.length;
-    }
+    inserted += await addCandidates(await fetchLatestUploadIds(channel.uploads_playlist_id), "channel");
     unwrap(await db().from("channels").update({ last_synced_at: new Date().toISOString() }).eq("id", channel.id));
   }
   return inserted;
 }
 
-function toVideoRow(v: YoutubeVideo) {
-  return {
-    id: v.id,
-    channel_id: v.channelId,
-    channel_title: v.channelTitle,
-    title: v.title,
-    description: v.description,
-    published_at: v.publishedAt,
-    duration_seconds: v.durationSeconds,
-    thumbnail_url: v.thumbnailUrl,
-    fetched_at: new Date().toISOString(),
-  };
+async function discover(deadline: number): Promise<{ inserted: number; error: string | null }> {
+  const goals = unwrap(
+    await db().from("goals").select("id, name, description, discovery_queries, discovered_at").order("created_at"),
+  ) as (Goal & { discovery_queries: string[]; discovered_at: string | null })[];
+  const due = goals
+    .filter((g) => !g.discovered_at || Date.now() - Date.parse(g.discovered_at) > DISCOVER_EVERY_MS)
+    .slice(0, MAX_DISCOVERY_GOALS_PER_RUN);
+  if (!due.length || deadline - Date.now() < 60_000) return { inserted: 0, error: null };
+
+  let inserted = 0;
+  try {
+    const queries = await generateDiscoveryQueries(due, DISCOVERY_QUERIES_PER_GOAL, { deadline });
+    for (const goal of due) {
+      const list = queries.get(goal.id);
+      if (!list) continue;
+      const ids = new Set<string>();
+      for (const [i, query] of list.entries()) {
+        const duration = i < list.length - 1 ? "long" : "medium";
+        for (const id of await searchVideoIds(query, { duration, maxResults: DISCOVERY_RESULTS_PER_QUERY })) ids.add(id);
+      }
+      inserted += await addCandidates([...ids], "discovery");
+      unwrap(
+        await db().from("goals").update({ discovery_queries: list, discovered_at: new Date().toISOString() }).eq("id", goal.id),
+      );
+    }
+  } catch (e) {
+    return { inserted, error: friendlyGeminiError(e) };
+  }
+  return { inserted, error: null };
 }
 
 async function screenPending(deadline: number): Promise<{ screened: number; pending: number; error: string | null }> {
@@ -80,29 +109,17 @@ async function screenPending(deadline: number): Promise<{ screened: number; pend
       .select("id, title, channel_title, description, screenings(video_id)")
       .gte("duration_seconds", MIN_VIDEO_SECONDS)
       .is("screenings", null)
+      .order("fetched_at", { ascending: false })
       .limit(MAX_SCREENED_PER_RUN),
-  ) as { id: string; title: string; channel_title: string; description: string }[];
+  ) as ScreeningCandidate[];
 
   let screened = 0;
   let error: string | null = null;
   for (let i = 0; i < pending.length; i += SCREENING_BATCH) {
     if (deadline - Date.now() < 20_000) break;
     if (i > 0) await new Promise((resolve) => setTimeout(resolve, 4_000));
-    const batch = pending.slice(i, i + SCREENING_BATCH);
     try {
-      const results = await screenCandidates(
-        goals,
-        batch.map((v) => ({ id: v.id, title: v.title, channelTitle: v.channel_title, description: v.description })),
-        { deadline },
-      );
-      if (results.length) {
-        unwrap(
-          await db()
-            .from("screenings")
-            .upsert(results.map((r) => ({ video_id: r.videoId, goal_id: r.goalId, score: r.score, reason: r.reason }))),
-        );
-        screened += results.length;
-      }
+      screened += await screenAndSave(goals, pending.slice(i, i + SCREENING_BATCH), { deadline });
     } catch (e) {
       error = friendlyGeminiError(e);
       break;

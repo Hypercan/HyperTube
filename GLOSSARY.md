@@ -15,11 +15,15 @@ Kullanıcının videolarını düzenli olarak aday havuzuna almak istediği, ken
 _Avoid_: Abonelik, takip edilen kanal
 
 **Keşif araması**:
-Bir hedef için, kaynak kanalların dışındaki videoları bulmak amacıyla yapılan arama.
+Bir hedef için, kaynak kanalların dışındaki videoları bulmak amacıyla günde bir kez otomatik yapılan arama; sorguları Gemini yazar ve her gün öncekilerden farklı olur.
 _Avoid_: Sorgu, search
 
+**Arama**:
+Kullanıcının elle yaptığı YouTube araması; sonuçlar ön elemeden geçirilip hedeflere göre puanıyla sıralanır.
+_Avoid_: Keşif araması (o otomatiktir)
+
 **Aday**:
-Kaynak kanallardan veya keşif aramasından gelmiş, henüz akışa girip girmeyeceği belirlenmemiş video.
+Kaynak kanallardan, keşif aramasından veya aramadan gelmiş, henüz akışa girip girmeyeceği belirlenmemiş video.
 _Avoid_: Sonuç, öneri
 
 ### Değerlendirme

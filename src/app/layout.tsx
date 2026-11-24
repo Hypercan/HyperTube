@@ -27,6 +27,15 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/ayarlar" className="text-zinc-400 hover:text-zinc-100">
               Hedefler & Kanallar
             </Link>
+            <form action="/ara" className="ml-auto w-full max-w-xs">
+              <input
+                type="search"
+                name="q"
+                placeholder="Ara…"
+                aria-label="YouTube'da ara"
+                className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+              />
+            </form>
           </nav>
         </header>
         <div className="flex-1">{children}</div>

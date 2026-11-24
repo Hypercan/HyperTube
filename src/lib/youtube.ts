@@ -58,6 +58,21 @@ export async function fetchLatestUploadIds(uploadsPlaylistId: string): Promise<s
   return (data.items ?? []).map((item) => item.contentDetails.videoId);
 }
 
+/** search.list has a small daily quota (~100 calls), so callers keep the number of searches low. */
+export async function searchVideoIds(
+  query: string,
+  { duration, maxResults = 25 }: { duration: "long" | "medium" | "any"; maxResults?: number },
+): Promise<string[]> {
+  const data = await call<{ items?: { id: { videoId?: string } }[] }>("search", {
+    part: "id",
+    type: "video",
+    q: query,
+    videoDuration: duration,
+    maxResults: String(maxResults),
+  });
+  return (data.items ?? []).flatMap((item) => (item.id.videoId ? [item.id.videoId] : []));
+}
+
 export type YoutubeVideo = {
   id: string;
   channelId: string;
