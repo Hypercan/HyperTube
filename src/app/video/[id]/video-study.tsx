@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatDuration } from "@/lib/duration";
-import type { Syllabus } from "@/lib/syllabus";
+import type { Syllabus, SyllabusState } from "@/lib/syllabus";
 
 type YTPlayer = { seekTo(seconds: number, allowSeekAhead: boolean): void; playVideo(): void; destroy(): void };
 type YTNamespace = { Player: new (el: HTMLElement, options: { videoId: string; playerVars?: Record<string, number> }) => YTPlayer };
@@ -30,7 +30,19 @@ function loadIframeApi(): Promise<YTNamespace> {
   });
 }
 
-type State = { status: "ready"; syllabus: Syllabus } | { status: "loading" } | { status: "error"; message: string };
+type State = SyllabusState | { status: "checking" };
+
+const POLL_MS = 5_000;
+
+async function requestState(videoId: string, method: "GET" | "POST"): Promise<SyllabusState> {
+  try {
+    const res = await fetch(`/api/syllabus/${videoId}`, { method, cache: "no-store" });
+    const body = (await res.json()) as SyllabusState | { error: string };
+    return "status" in body ? body : { status: "failed", error: body.error };
+  } catch {
+    return { status: "failed", error: "Sunucuya ulaşılamadı. Bağlantını kontrol edip tekrar dene." };
+  }
+}
 
 export function VideoStudy({
   video,
@@ -43,8 +55,7 @@ export function VideoStudy({
 }) {
   const container = useRef<HTMLDivElement>(null);
   const player = useRef<YTPlayer | null>(null);
-  const requested = useRef(false);
-  const [state, setState] = useState<State>(initialSyllabus ? { status: "ready", syllabus: initialSyllabus } : { status: "loading" });
+  const [state, setState] = useState<State>(initialSyllabus ? { status: "ready", syllabus: initialSyllabus } : { status: "checking" });
 
   useEffect(() => {
     let cancelled = false;
@@ -63,18 +74,34 @@ export function VideoStudy({
     };
   }, [video.id]);
 
-  const generate = useCallback(async () => {
-    setState({ status: "loading" });
-    const res = await fetch(`/api/syllabus/${video.id}`, { method: "POST" });
-    const body = await res.json().catch(() => ({ error: "Beklenmeyen yanıt." }));
-    setState(res.ok ? { status: "ready", syllabus: body as Syllabus } : { status: "error", message: body.error });
+  const start = useCallback(async () => {
+    setState({ status: "checking" });
+    setState(await requestState(video.id, "POST"));
   }, [video.id]);
 
   useEffect(() => {
-    if (initialSyllabus || requested.current) return;
-    requested.current = true;
-    generate();
-  }, [initialSyllabus, generate]);
+    if (initialSyllabus) return;
+    let cancelled = false;
+    requestState(video.id, "GET").then(async (current) => {
+      if (cancelled) return;
+      if (current.status !== "none") return setState(current);
+      const started = await requestState(video.id, "POST");
+      if (!cancelled) setState(started);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSyllabus, video.id]);
+
+  const running = state.status === "running";
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(async () => {
+      const current = await requestState(video.id, "GET");
+      if (current.status !== "running") setState(current);
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [running, video.id]);
 
   const seek = (seconds: number) => {
     player.current?.seekTo(seconds, true);
@@ -92,19 +119,37 @@ export function VideoStudy({
 
       <aside className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-5 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto">
         <p className="text-[11px] uppercase tracking-wide text-amber-400/90">HyperTube analizi · Syllabus</p>
-        {state.status === "loading" && (
-          <p className="mt-4 animate-pulse text-sm text-zinc-400">Gemini videoyu izliyor ve syllabus hazırlıyor… (30–90 sn)</p>
-        )}
-        {state.status === "error" && (
+        {(state.status === "checking" || state.status === "none") && <p className="mt-4 animate-pulse text-sm text-zinc-400">Hazırlanıyor…</p>}
+        {state.status === "running" && <Running startedAt={state.startedAt} durationSeconds={video.durationSeconds} />}
+        {state.status === "failed" && (
           <div className="mt-4 grid gap-3 text-sm">
-            <p className="text-red-300">{state.message}</p>
-            <button onClick={generate} className="justify-self-start rounded-md border border-zinc-700 px-3 py-1.5 hover:border-zinc-500">
+            <p className="text-red-300">{state.error}</p>
+            <button onClick={start} className="justify-self-start rounded-md border border-zinc-700 px-3 py-1.5 hover:border-zinc-500">
               Tekrar dene
             </button>
           </div>
         )}
         {state.status === "ready" && <SyllabusView syllabus={state.syllabus} onSeek={seek} />}
       </aside>
+    </div>
+  );
+}
+
+function Running({ startedAt, durationSeconds }: { startedAt: string; durationSeconds: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  const elapsed = Math.max(0, Math.round((now - Date.parse(startedAt)) / 1000));
+
+  return (
+    <div className="mt-4 grid gap-2 text-sm">
+      <p className="animate-pulse text-zinc-300">Gemini videoyu izliyor ve syllabus hazırlıyor… {formatDuration(elapsed)}</p>
+      <p className="text-xs text-zinc-500">
+        {durationSeconds >= 30 * 60 ? "Uzun videolarda bu 2–4 dakika sürebilir." : "Genelde 1–2 dakika sürer."} Sayfadan çıkabilirsin; analiz arka planda
+        devam eder.
+      </p>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import "server-only";
-import { ApiError, GoogleGenAI, type GenerateContentParameters, type GenerateContentResponse } from "@google/genai";
+import { ApiError, GoogleGenAI, MediaResolution, type GenerateContentParameters, type GenerateContentResponse } from "@google/genai";
 import type { Goal } from "./db";
 import { env } from "./env";
 import { framesPerSecondFor, normalizeSyllabus, SYLLABUS_SCHEMA, type Syllabus } from "./syllabus";
@@ -24,19 +24,29 @@ function errorText(error: unknown): string {
   return String(error);
 }
 
+function isTimeout(error: unknown): boolean {
+  return error instanceof DeadlineReached || (error instanceof Error && (error.name === "AbortError" || /timed? ?out|aborted/i.test(error.message)));
+}
+
 /** Google's 503 / UNAVAILABLE / high-demand responses should be retried or switched to another model. */
 export function isGeminiTransient(error: unknown): boolean {
-  if (error instanceof Error && (error.name === "AbortError" || /timed? ?out|aborted/i.test(error.message))) return true;
+  if (isTimeout(error)) return true;
   if (error instanceof ApiError) {
     return [408, 429, 500, 502, 503, 504].includes(error.status);
   }
   return /503|429|UNAVAILABLE|high demand|RESOURCE_EXHAUSTED|overloaded|try again later/i.test(errorText(error));
 }
 
+export function geminiErrorDetail(error: unknown): string {
+  const raw = errorText(error);
+  return raw.length > 1000 ? `${raw.slice(0, 1000)}…` : raw;
+}
+
 /** User-facing Turkish copy for settings / API responses. */
 export function friendlyGeminiError(error: unknown): string {
+  if (isTimeout(error)) return "Gemini zamanında yanıt vermedi. Birkaç dakika sonra tekrar dene.";
   if (isGeminiTransient(error)) {
-    return "Gemini şu an yoğun (geçici). Birkaç dakika sonra Yenile’yi tekrar dene; sorun sürerse Vercel’de GEMINI_SCREENING_MODEL=gemini-2.5-flash-lite yapıp Redeploy et.";
+    return "Gemini şu an yoğun ya da kota doldu (geçici). Birkaç dakika sonra tekrar dene.";
   }
   const raw = errorText(error);
   try {
@@ -68,10 +78,11 @@ async function generate(params: GenerateContentParameters, options: CallOptions)
     const left = remaining(options);
     if (left < 5_000) throw new DeadlineReached();
     const timeout = Math.min(options.timeoutMs ?? 90_000, left);
+    const httpOptions = Number.isFinite(timeout) ? { timeout } : undefined;
     try {
-      return await client_().models.generateContent({ ...params, config: { ...params.config, httpOptions: { timeout } } });
+      return await client_().models.generateContent({ ...params, config: { ...params.config, httpOptions } });
     } catch (error) {
-      if (!isGeminiTransient(error) || delayMs === 0 || remaining(options) < delayMs + 5_000) throw error;
+      if (isTimeout(error) || !isGeminiTransient(error) || delayMs === 0 || remaining(options) < delayMs + 5_000) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -155,7 +166,10 @@ ${videoList}`;
 }
 
 /** Derin analiz: Gemini watches the public video itself instead of a transcript (ADR-0004). */
-export async function generateSyllabus(video: { id: string; title: string; durationSeconds: number }): Promise<Syllabus> {
+export async function generateSyllabus(
+  video: { id: string; title: string; durationSeconds: number },
+  options: CallOptions,
+): Promise<{ syllabus: Syllabus; model: string }> {
   const prompt = `Bu YouTube videosunu ("${video.title}") baştan sona incele ve kendini geliştirmek isteyen bir izleyici için bir syllabus hazırla.
 Konuşmayı ve ekranda gösterilen slayt, kod, diyagram gibi görselleri birlikte değerlendir.
 Bölümler videonun gerçek akışını yansıtsın; zaman damgaları videodaki gerçek başlangıç anları olsun.
@@ -172,11 +186,19 @@ Video hangi dilde olursa olsun her şeyi Türkçe yaz.`;
         },
         { text: prompt },
       ],
-      config: { responseMimeType: "application/json", responseJsonSchema: SYLLABUS_SCHEMA },
+      config: {
+        responseMimeType: "application/json",
+        responseJsonSchema: SYLLABUS_SCHEMA,
+        // framesPerSecondFor budgets ~70 tokens per frame, which is the low resolution rate.
+        mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
+      },
     }),
     models,
-    { timeoutMs: 150_000, deadline: Date.now() + 280_000 },
+    { timeoutMs: Infinity, ...options },
   );
 
-  return normalizeSyllabus(JSON.parse(response.text ?? "{}") as Syllabus, video.durationSeconds);
+  return {
+    syllabus: normalizeSyllabus(JSON.parse(response.text ?? "{}") as Syllabus, video.durationSeconds),
+    model: response.modelVersion ?? env.syllabusModel,
+  };
 }

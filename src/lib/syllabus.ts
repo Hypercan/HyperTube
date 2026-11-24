@@ -6,6 +6,13 @@ export type Syllabus = {
   keyTakeaways: string[];
 };
 
+/** What the video page polls while Derin analiz runs in the background. */
+export type SyllabusState =
+  | { status: "ready"; syllabus: Syllabus }
+  | { status: "running"; startedAt: string }
+  | { status: "failed"; error: string }
+  | { status: "none" };
+
 export const SYLLABUS_SCHEMA = {
   type: "object",
   properties: {
