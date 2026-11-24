@@ -1,0 +1,3 @@
+# YouTube istatistikleri sıralamaya girmez
+
+YouTube Developer Policies (III.E.4.8), API verisinden türetilmiş metrik üretmeyi yasaklıyor ve örnek olarak "beğeni, toplam görüntülenme veya başka herhangi bir API verisini hesaba katan bir puan"ı veriyor; ayrıca HyperTube'un çözdüğü sorun tam da bu popülerlik sinyalleri. Bu yüzden akışın sıralama puanı yalnızca bizim sinyallerimizden oluşur (hedefler, Gemini'nin içerik değerlendirmesi, kullanıcı geri bildirimi); görüntülenme, beğeni, süre gibi API alanları puana girmez. Süre ve tarih gibi alanlar yalnızca filtre olarak kullanılır (ör. Shorts asla gösterilmez).
