@@ -2,31 +2,46 @@ import "server-only";
 import { db, today, unwrap, type Channel, type Goal } from "./db";
 import { MIN_VIDEO_SECONDS } from "./duration";
 import { buildFeed } from "./feed";
-import { screenCandidates } from "./gemini";
+import { friendlyGeminiError, screenCandidates } from "./gemini";
 import { fetchLatestUploadIds, fetchVideos, type YoutubeVideo } from "./youtube";
 
 const SCREENING_BATCH = 25;
 const RECENTLY_SHOWN_DAYS = 7;
 const REFRESH_AFTER_DAYS = 25;
-/** Keeps one run inside the serverless time limit; the rest is screened on the next run. */
 const MAX_SCREENED_PER_RUN = 250;
+/** Time kept back after Ön eleme so the Akış is always rebuilt before the serverless limit. */
+const FEED_RESERVE_MS = 25_000;
 
-export type PipelineReport = { newVideos: number; screened: number; feedSize: number; refreshed: number; deleted: number };
+export type PipelineReport = {
+  newVideos: number;
+  screened: number;
+  pending: number;
+  feedSize: number;
+  refreshed: number;
+  deleted: number;
+  screeningError: string | null;
+};
 
-/** The daily job: Kaynak kanallar → Adaylar → Ön eleme → Akış. */
-export async function runDailyPipeline(): Promise<PipelineReport> {
+/**
+ * The daily job: Kaynak kanallar → Adaylar → Ön eleme → Akış. Ön eleme stops when the
+ * time budget runs out or Gemini is unavailable; whatever was screened still makes an Akış,
+ * and the rest is picked up by the next run.
+ */
+export async function runDailyPipeline({ budgetMs }: { budgetMs: number }): Promise<PipelineReport> {
+  const deadline = Date.now() + budgetMs;
   const { refreshed, deleted } = await enforceRetention();
   const newVideos = await ingestChannels();
-  const screened = await screenPending();
+  const { screened, pending, error } = await screenPending(deadline - FEED_RESERVE_MS);
   const feedSize = await buildTodayFeed();
-  return { newVideos, screened, feedSize, refreshed, deleted };
+  return { newVideos, screened, pending, feedSize, refreshed, deleted, screeningError: error };
 }
 
 async function ingestChannels(): Promise<number> {
   const channels = unwrap(await db().from("channels").select("*")) as Channel[];
+  const syncedRecently = (c: Channel) => c.last_synced_at && Date.now() - Date.parse(c.last_synced_at) < 3 * 3600_000;
   let inserted = 0;
 
-  for (const channel of channels) {
+  for (const channel of channels.filter((c) => !syncedRecently(c))) {
     const ids = await fetchLatestUploadIds(channel.uploads_playlist_id);
     const known = unwrap(await db().from("videos").select("id").in("id", ids)) as { id: string }[];
     const knownIds = new Set(known.map((v) => v.id));
@@ -55,9 +70,9 @@ function toVideoRow(v: YoutubeVideo) {
   };
 }
 
-async function screenPending(): Promise<number> {
+async function screenPending(deadline: number): Promise<{ screened: number; pending: number; error: string | null }> {
   const goals = unwrap(await db().from("goals").select("id, name, description").order("created_at")) as Goal[];
-  if (!goals.length) return 0;
+  if (!goals.length) return { screened: 0, pending: 0, error: null };
 
   const pending = unwrap(
     await db()
@@ -69,23 +84,31 @@ async function screenPending(): Promise<number> {
   ) as { id: string; title: string; channel_title: string; description: string }[];
 
   let screened = 0;
+  let error: string | null = null;
   for (let i = 0; i < pending.length; i += SCREENING_BATCH) {
+    if (deadline - Date.now() < 20_000) break;
     if (i > 0) await new Promise((resolve) => setTimeout(resolve, 4_000));
     const batch = pending.slice(i, i + SCREENING_BATCH);
-    const results = await screenCandidates(
-      goals,
-      batch.map((v) => ({ id: v.id, title: v.title, channelTitle: v.channel_title, description: v.description })),
-    );
-    if (results.length) {
-      unwrap(
-        await db()
-          .from("screenings")
-          .upsert(results.map((r) => ({ video_id: r.videoId, goal_id: r.goalId, score: r.score, reason: r.reason }))),
+    try {
+      const results = await screenCandidates(
+        goals,
+        batch.map((v) => ({ id: v.id, title: v.title, channelTitle: v.channel_title, description: v.description })),
+        { deadline },
       );
-      screened += results.length;
+      if (results.length) {
+        unwrap(
+          await db()
+            .from("screenings")
+            .upsert(results.map((r) => ({ video_id: r.videoId, goal_id: r.goalId, score: r.score, reason: r.reason }))),
+        );
+        screened += results.length;
+      }
+    } catch (e) {
+      error = friendlyGeminiError(e);
+      break;
     }
   }
-  return screened;
+  return { screened, pending: Math.max(0, pending.length - screened), error };
 }
 
 async function buildTodayFeed(): Promise<number> {

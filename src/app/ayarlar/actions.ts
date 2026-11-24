@@ -72,10 +72,14 @@ export async function refreshFeed() {
   await requireSession();
   let report;
   try {
-    report = await runDailyPipeline();
+    report = await runDailyPipeline({ budgetMs: 150_000 });
   } catch (error) {
     back(`Yenileme yarıda kaldı: ${friendlyGeminiError(error)}`, "hata");
   }
   revalidatePath("/", "layout");
-  back(`Akış yenilendi: ${report.newVideos} yeni aday, ${report.screened} ön eleme, Akış'ta ${report.feedSize} video.`);
+
+  const summary = `${report.newVideos} yeni aday, ${report.screened} ön eleme, Akış'ta ${report.feedSize} video.`;
+  if (report.screeningError) back(`Akış güncellendi (${summary}) Ön eleme durdu: ${report.screeningError}`, "hata");
+  if (report.pending > 0) back(`Akış güncellendi: ${summary} ${report.pending} aday hâlâ sırada; kalanlar için Yenile'ye tekrar bas.`);
+  back(`Akış yenilendi: ${summary}`);
 }

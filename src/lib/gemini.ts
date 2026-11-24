@@ -6,15 +6,18 @@ import { framesPerSecondFor, normalizeSyllabus, SYLLABUS_SCHEMA, type Syllabus }
 
 let client: GoogleGenAI | undefined;
 
-const RETRY_DELAYS_MS = [12_000, 25_000, 45_000, 90_000, 0];
+/** Short waits only: a serverless run has minutes, so an overloaded model is skipped rather than waited out. */
+const RETRY_DELAYS_MS = [4_000, 0];
 
-const SCREENING_FALLBACKS = ["gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"];
-const SYLLABUS_FALLBACKS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash"];
+const SCREENING_FALLBACKS = ["gemini-2.5-flash-lite", "gemini-3.8-flash"];
+const SYLLABUS_FALLBACKS = ["gemini-3.8-flash", "gemini-2.5-flash"];
 
 function client_(): GoogleGenAI {
   client ??= new GoogleGenAI({ apiKey: env.geminiApiKey });
   return client;
 }
+
+export type CallOptions = { deadline?: number; timeoutMs?: number };
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -23,6 +26,7 @@ function errorText(error: unknown): string {
 
 /** Google's 503 / UNAVAILABLE / high-demand responses should be retried or switched to another model. */
 export function isGeminiTransient(error: unknown): boolean {
+  if (error instanceof Error && (error.name === "AbortError" || /timed? ?out|aborted/i.test(error.message))) return true;
   if (error instanceof ApiError) {
     return [408, 429, 500, 502, 503, 504].includes(error.status);
   }
@@ -49,26 +53,43 @@ function modelChain(primary: string, envList: string | undefined, defaults: stri
   return [...new Set([primary, ...extra, ...defaults])];
 }
 
-async function generate(params: GenerateContentParameters): Promise<GenerateContentResponse> {
+class DeadlineReached extends Error {
+  constructor() {
+    super("Süre doldu");
+  }
+}
+
+function remaining(options: CallOptions): number {
+  return options.deadline ? options.deadline - Date.now() : Infinity;
+}
+
+async function generate(params: GenerateContentParameters, options: CallOptions): Promise<GenerateContentResponse> {
   for (const delayMs of RETRY_DELAYS_MS) {
+    const left = remaining(options);
+    if (left < 5_000) throw new DeadlineReached();
+    const timeout = Math.min(options.timeoutMs ?? 90_000, left);
     try {
-      return await client_().models.generateContent(params);
+      return await client_().models.generateContent({ ...params, config: { ...params.config, httpOptions: { timeout } } });
     } catch (error) {
-      if (!isGeminiTransient(error) || delayMs === 0) throw error;
+      if (!isGeminiTransient(error) || delayMs === 0 || remaining(options) < delayMs + 5_000) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
   throw new Error("unreachable");
 }
 
-async function generateFirstAvailable(build: (model: string) => GenerateContentParameters, models: string[]): Promise<GenerateContentResponse> {
+async function generateFirstAvailable(
+  build: (model: string) => GenerateContentParameters,
+  models: string[],
+  options: CallOptions,
+): Promise<GenerateContentResponse> {
   let last: unknown;
   for (const model of models) {
     try {
-      return await generate(build(model));
+      return await generate(build(model), options);
     } catch (error) {
       last = error;
-      if (!isGeminiTransient(error)) throw error;
+      if (error instanceof DeadlineReached || !isGeminiTransient(error)) throw error;
     }
   }
   throw last ?? new Error("Gemini yanıt vermedi");
@@ -92,7 +113,7 @@ const SCREENING_SCHEMA = {
 } as const;
 
 /** Ön eleme: scores candidates from text alone. Popularity data is deliberately never sent (ADR-0001). */
-export async function screenCandidates(goals: Goal[], videos: ScreeningInput[]): Promise<ScreeningResult[]> {
+export async function screenCandidates(goals: Goal[], videos: ScreeningInput[], options: CallOptions = {}): Promise<ScreeningResult[]> {
   const goalList = goals.map((g, i) => `${i}. ${g.name}${g.description ? `: ${g.description}` : ""}`).join("\n");
   const videoList = videos
     .map((v, i) => `[${i}] ${v.title}\nKanal: ${v.channelTitle}\nAçıklama: ${v.description.slice(0, 700).replace(/\s+/g, " ")}`)
@@ -119,6 +140,7 @@ ${videoList}`;
       config: { responseMimeType: "application/json", responseJsonSchema: SCREENING_SCHEMA, temperature: 0.2 },
     }),
     models,
+    { timeoutMs: 60_000, ...options },
   );
 
   const parsed = JSON.parse(response.text ?? "[]") as { video: number; goal: number; score: number; reason: string }[];
@@ -153,6 +175,7 @@ Video hangi dilde olursa olsun her şeyi Türkçe yaz.`;
       config: { responseMimeType: "application/json", responseJsonSchema: SYLLABUS_SCHEMA },
     }),
     models,
+    { timeoutMs: 150_000, deadline: Date.now() + 280_000 },
   );
 
   return normalizeSyllabus(JSON.parse(response.text ?? "{}") as Syllabus, video.durationSeconds);

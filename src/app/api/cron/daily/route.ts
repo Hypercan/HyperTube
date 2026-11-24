@@ -9,6 +9,6 @@ export async function GET(request: Request) {
   const auth = request.headers.get("authorization") ?? "";
   if (!safeEqual(auth, `Bearer ${env.cronSecret}`)) return Response.json({ error: "Yetkisiz" }, { status: 401 });
 
-  const report = await runDailyPipeline();
+  const report = await runDailyPipeline({ budgetMs: 270_000 });
   return Response.json(report);
 }
