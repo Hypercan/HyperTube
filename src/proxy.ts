@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isPublicRequest } from "@/lib/access";
 import { isValidSession, SESSION_COOKIE } from "@/lib/session";
 
 export async function proxy(request: NextRequest) {
+  if (isPublicRequest(request.nextUrl.pathname, request.method)) return NextResponse.next();
   const ok = await isValidSession(request.cookies.get(SESSION_COOKIE)?.value, process.env.APP_PASSWORD);
   if (ok) return NextResponse.next();
 

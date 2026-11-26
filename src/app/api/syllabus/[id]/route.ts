@@ -27,7 +27,6 @@ async function currentState(id: string): Promise<SyllabusState> {
 }
 
 export async function GET(_request: Request, ctx: RouteContext<"/api/syllabus/[id]">) {
-  if (!(await hasSession())) return Response.json({ error: "Giriş gerekli" }, { status: 401 });
   const { id } = await ctx.params;
   return Response.json(await currentState(id));
 }

@@ -7,7 +7,8 @@ export type VideoCardProps = {
   channelTitle: string;
   durationSeconds: number;
   thumbnailUrl: string | null;
-  goalName: string | null;
+  /** Omitted for visitors, who never see Hedef names (ADR-0006). */
+  goalName?: string | null;
   text: string | null;
   badge?: string;
   score?: number | null;
@@ -36,7 +37,8 @@ export function VideoCard(video: VideoCardProps) {
       {video.text && (
         <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm">
           <p className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
-            <span className="text-amber-400/90">HyperTube analizi</span>· {video.goalName ?? "Hedeflerinle ilgisiz"}
+            <span className="text-amber-400/90">HyperTube analizi</span>
+            {video.goalName !== undefined && <>· {video.goalName ?? "Hedeflerinle ilgisiz"}</>}
             {video.score != null && <span className="ml-auto font-mono text-zinc-400">{video.score}</span>}
           </p>
           <p className="text-zinc-300">{video.text}</p>

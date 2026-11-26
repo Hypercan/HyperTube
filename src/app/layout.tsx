@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
+import { Suspense } from "react";
+import { OwnerNav } from "@/components/owner-nav";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin", "latin-ext"] });
@@ -24,18 +26,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/" className="text-zinc-400 hover:text-zinc-100">
               Akış
             </Link>
-            <Link href="/ayarlar" className="text-zinc-400 hover:text-zinc-100">
-              Hedefler & Kanallar
-            </Link>
-            <form action="/ara" className="ml-auto w-full max-w-xs">
-              <input
-                type="search"
-                name="q"
-                placeholder="Ara…"
-                aria-label="YouTube'da ara"
-                className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
-              />
-            </form>
+            <Suspense>
+              <OwnerNav />
+            </Suspense>
           </nav>
         </header>
         <div className="flex-1">{children}</div>

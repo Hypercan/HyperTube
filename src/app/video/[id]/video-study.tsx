@@ -47,10 +47,12 @@ async function requestState(videoId: string, method: "GET" | "POST"): Promise<Sy
 export function VideoStudy({
   video,
   initialSyllabus,
+  canGenerate,
   header,
 }: {
   video: { id: string; title: string; durationSeconds: number };
   initialSyllabus: Syllabus | null;
+  canGenerate: boolean;
   header: React.ReactNode;
 }) {
   const container = useRef<HTMLDivElement>(null);
@@ -84,14 +86,14 @@ export function VideoStudy({
     let cancelled = false;
     requestState(video.id, "GET").then(async (current) => {
       if (cancelled) return;
-      if (current.status !== "none") return setState(current);
+      if (current.status !== "none" || !canGenerate) return setState(current);
       const started = await requestState(video.id, "POST");
       if (!cancelled) setState(started);
     });
     return () => {
       cancelled = true;
     };
-  }, [initialSyllabus, video.id]);
+  }, [initialSyllabus, canGenerate, video.id]);
 
   const running = state.status === "running";
   useEffect(() => {
@@ -119,9 +121,14 @@ export function VideoStudy({
 
       <aside className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-5 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto">
         <p className="text-[11px] uppercase tracking-wide text-amber-400/90">HyperTube analizi · Syllabus</p>
-        {(state.status === "checking" || state.status === "none") && <p className="mt-4 animate-pulse text-sm text-zinc-400">Hazırlanıyor…</p>}
+        {(state.status === "checking" || (state.status === "none" && canGenerate)) && (
+          <p className="mt-4 animate-pulse text-sm text-zinc-400">Hazırlanıyor…</p>
+        )}
+        {!canGenerate && (state.status === "none" || state.status === "failed") && (
+          <p className="mt-4 text-sm text-zinc-400">Bu video için henüz syllabus hazırlanmadı.</p>
+        )}
         {state.status === "running" && <Running startedAt={state.startedAt} durationSeconds={video.durationSeconds} />}
-        {state.status === "failed" && (
+        {canGenerate && state.status === "failed" && (
           <div className="mt-4 grid gap-3 text-sm">
             <p className="text-red-300">{state.error}</p>
             <button onClick={start} className="justify-self-start rounded-md border border-zinc-700 px-3 py-1.5 hover:border-zinc-500">

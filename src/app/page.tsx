@@ -3,6 +3,7 @@ import { Chip } from "@/components/chip";
 import { Loading } from "@/components/loading";
 import { VideoCard } from "@/components/video-card";
 import Link from "next/link";
+import { hasSession } from "@/lib/auth";
 import type { CandidateSource } from "@/lib/candidates";
 import { db, today, unwrap } from "@/lib/db";
 import { DURATION_FILTERS, parseDurationFilter, type DurationFilter } from "@/lib/duration";
@@ -27,7 +28,8 @@ type FeedRow = {
 async function FeedPageContent(props: PageProps<"/">) {
   const params = await props.searchParams;
   const filter = parseDurationFilter(typeof params.sure === "string" ? params.sure : undefined);
-  const goalFilter = typeof params.hedef === "string" ? params.hedef : undefined;
+  const isOwner = await hasSession();
+  const goalFilter = isOwner && typeof params.hedef === "string" ? params.hedef : undefined;
 
   const goals = unwrap(await db().from("goals").select("id, name").order("created_at")) as { id: string; name: string }[];
   const latest = unwrap(
@@ -63,6 +65,8 @@ async function FeedPageContent(props: PageProps<"/">) {
     return s ? `/?${s}` : "/";
   };
 
+  if (!isOwner && (!feedDate || !goals.length)) return <Empty>Akış henüz hazırlanmadı. Biraz sonra tekrar uğra.</Empty>;
+
   if (!goals.length) {
     return (
       <Empty>
@@ -80,15 +84,19 @@ async function FeedPageContent(props: PageProps<"/">) {
             {DURATION_FILTERS[key].label}
           </Chip>
         ))}
-        <span className="mx-2 h-5 w-px bg-zinc-800" />
-        <Chip href={href({ hedef: null })} active={!goalFilter}>
-          Tüm hedefler
-        </Chip>
-        {goals.map((goal) => (
-          <Chip key={goal.id} href={href({ hedef: goal.id })} active={goal.id === goalFilter}>
-            {goal.name}
-          </Chip>
-        ))}
+        {isOwner && (
+          <>
+            <span className="mx-2 h-5 w-px bg-zinc-800" />
+            <Chip href={href({ hedef: null })} active={!goalFilter}>
+              Tüm hedefler
+            </Chip>
+            {goals.map((goal) => (
+              <Chip key={goal.id} href={href({ hedef: goal.id })} active={goal.id === goalFilter}>
+                {goal.name}
+              </Chip>
+            ))}
+          </>
+        )}
         {feedDate && <span className="ml-auto text-xs text-zinc-500">Akış: {feedDate}</span>}
       </div>
 
@@ -108,7 +116,7 @@ async function FeedPageContent(props: PageProps<"/">) {
               channelTitle={video.channel_title}
               durationSeconds={video.duration_seconds}
               thumbnailUrl={video.thumbnail_url}
-              goalName={goal.name}
+              goalName={isOwner ? goal.name : undefined}
               text={video.syllabi?.content.mainIdea ?? video.screenings?.reason ?? null}
               badge={video.source === "channel" ? undefined : "Keşif"}
             />

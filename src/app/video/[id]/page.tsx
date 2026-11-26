@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { Loading } from "@/components/loading";
+import { hasSession } from "@/lib/auth";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db, unwrap, type Video } from "@/lib/db";
@@ -18,6 +19,7 @@ async function VideoPageContent(props: PageProps<"/video/[id]">) {
     await db().from("videos").select("*, screenings(reason, score, goals(name)), syllabi(content)").eq("id", id).maybeSingle(),
   ) as VideoWithAnalysis | null;
   if (!video) notFound();
+  const isOwner = await hasSession();
 
   return (
     <main className="mx-auto max-w-7xl px-6 py-6">
@@ -27,6 +29,7 @@ async function VideoPageContent(props: PageProps<"/video/[id]">) {
       <VideoStudy
         video={{ id: video.id, title: video.title, durationSeconds: video.duration_seconds }}
         initialSyllabus={video.syllabi?.content ?? null}
+        canGenerate={isOwner}
         header={
           <div className="mt-4">
             <h1 className="text-xl font-semibold leading-snug">{video.title}</h1>
@@ -39,7 +42,7 @@ async function VideoPageContent(props: PageProps<"/video/[id]">) {
             {video.screenings && (
               <p className="mt-3 text-sm text-zinc-300">
                 <span className="text-[11px] uppercase tracking-wide text-amber-400/90">HyperTube analizi</span>
-                {video.screenings.goals && <span className="text-zinc-500"> · {video.screenings.goals.name}</span>}
+                {isOwner && video.screenings.goals && <span className="text-zinc-500"> · {video.screenings.goals.name}</span>}
                 <br />
                 {video.screenings.reason}
               </p>
